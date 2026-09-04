@@ -29,10 +29,12 @@ const DEFAULT_STATE = () => ({
   groups: [],           // grupos de gastos
   investmentTypes: [{ id: uid(), nome: 'Reserva de emergência' }],
   investments: [],      // aportes
+  saldoInicialPorConta: {}, // { contaId: { 'AAAA-MM': valor } } — pra reconciliar com o banco
   settings: {
     poupancaMetaPct: 15,
     metaInvestimentoValor: null, // se preenchido, vira a meta em R$ fixo (sobrepõe o %)
-    theme: 'dark'
+    theme: 'dark',
+    lastBackupExport: null // ISO date da última vez que exportou backup
   }
 });
 
@@ -52,6 +54,8 @@ function fmtDate(iso){
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 function monthKey(iso){ return iso.slice(0,7); } // YYYY-MM
 function currentMonthKey(){ return monthKey(todayISO()); }
+function prevMonthKey(mk){ const [y,m]=mk.split('-').map(Number); const d=new Date(y,m-2,1); return d.toISOString().slice(0,7); }
+function nextMonthKey(mk){ const [y,m]=mk.split('-').map(Number); const d=new Date(y,m,1); return d.toISOString().slice(0,7); }
 function monthLabel(mk){
   const [y,m] = mk.split('-').map(Number);
   const d = new Date(y, m-1, 1);
@@ -78,6 +82,9 @@ async function loadState(){
       for(const k in def){ if(!(k in STATE)) STATE[k] = def[k]; }
       if(!STATE.salario) STATE.salario = def.salario;
       if(!STATE.salario.liquidoPorMes) STATE.salario.liquidoPorMes = {};
+      if(!STATE.saldoInicialPorConta) STATE.saldoInicialPorConta = {};
+      if(!STATE.settings) STATE.settings = def.settings;
+      if(!('lastBackupExport' in STATE.settings)) STATE.settings.lastBackupExport = null;
       return;
     }
   }catch(e){ /* chave não existe ainda */ }
@@ -99,6 +106,36 @@ async function persist(){
       resolve();
     }, 180);
   });
+}
+
+async function exportBackup(){
+  const blob = new Blob([JSON.stringify(STATE,null,2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `meufinanceiro-backup-${todayISO()}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  STATE.settings.lastBackupExport = todayISO();
+  await persist();
+  showToast('Backup exportado');
+  renderAll();
+}
+
+function backupReminderBanner(){
+  const last = STATE.settings.lastBackupExport;
+  let dias = null;
+  if(last){
+    dias = Math.floor((new Date(todayISO()) - new Date(last)) / 86400000);
+  }
+  if(last && dias < 15) return '';
+  const msg = last
+    ? `Já fazem ${dias} dias que você não faz backup dos seus dados.`
+    : 'Você ainda não fez nenhum backup dos seus dados.';
+  return `
+  <div class="card" style="border-color:var(--amber);padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+    <div style="font-size:12.5px;color:var(--amber);">${msg}</div>
+    <button class="btn small secondary" id="btn-backup-lembrete" style="flex:none;">Fazer agora</button>
+  </div>`;
 }
 
 function showToast(msg){
@@ -136,6 +173,92 @@ function faturaAbertaTotal(accountId, mk){
     .filter(e => e.tipo==='despesa' && (e.forma==='credito'||e.forma==='credito_parcelado')
       && e.conta===accountId && monthKey(e.data)===mk && !e.faturaPagaId)
     .reduce((s,e)=>s+e.valor,0);
+}
+
+/* ---- Saldo por conta (reconciliação com o banco) ---- */
+function movimentacaoConta(accountId, mk){
+  let delta = 0;
+  entriesOfMonth(mk).forEach(e=>{
+    if(e.conta!==accountId) return;
+    if(e.tipo==='receita') delta += e.valor;
+    else if(e.tipo==='despesa' && ['debito','pix','dinheiro'].includes(e.forma)) delta -= e.valor;
+  });
+  STATE.entries.filter(e=>e.tipo==='fatura_paga' && e.conta===accountId && monthKey(e.data)===mk)
+    .forEach(e=> delta -= e.valor);
+  STATE.entries.filter(e=>e.tipo==='transferencia' && monthKey(e.data)===mk).forEach(e=>{
+    if(e.conta===accountId) delta += e.valor;
+    if(e.contaOrigem===accountId) delta -= e.valor;
+  });
+  return delta;
+}
+
+function saldoContaInfo(accountId, mk){
+  let cursor = mk;
+  let overrideMk = null;
+  for(let i=0;i<36;i++){
+    const porConta = STATE.saldoInicialPorConta[accountId];
+    const val = porConta ? porConta[cursor] : undefined;
+    if(val !== undefined){ overrideMk = cursor; break; }
+    cursor = prevMonthKey(cursor);
+  }
+  let saldo = overrideMk ? STATE.saldoInicialPorConta[accountId][overrideMk] : 0;
+  let walk = overrideMk || cursor;
+  let guard = 0;
+  while(walk !== mk && guard < 40){
+    saldo += movimentacaoConta(accountId, walk);
+    walk = nextMonthKey(walk);
+    guard++;
+  }
+  const inicial = saldo;
+  const mov = movimentacaoConta(accountId, mk);
+  return { inicial, movimentacao: mov, final: inicial + mov, informado: !!overrideMk };
+}
+
+function viewSaldoContasCard(mk){
+  if(!STATE.accounts.length) return '';
+  const rows = STATE.accounts.map(a=>{
+    const info = saldoContaInfo(a.id, mk);
+    return `
+    <div class="fixedline" style="align-items:flex-start;flex-direction:column;gap:6px;padding:12px 0;">
+      <div class="row" style="width:100%;align-items:center;">
+        <div class="name" style="flex:1;">${a.nome}</div>
+        <button class="btn small secondary" data-edit-saldo-inicial="${a.id}">saldo inicial</button>
+      </div>
+      <div class="grid3" style="width:100%;">
+        <div class="stat"><div class="label">INICIAL${info.informado?'':' (estim.)'}</div><div class="val">${fmtMoney(info.inicial)}</div></div>
+        <div class="stat"><div class="label">MOVIMENTAÇÃO</div><div class="val ${info.movimentacao>=0?'pos':'neg'}">${fmtMoney(info.movimentacao)}</div></div>
+        <div class="stat"><div class="label">FINAL CALCULADO</div><div class="val">${fmtMoney(info.final)}</div></div>
+      </div>
+    </div>`;
+  }).join('');
+  return `<div class="card">
+    <h2>Saldo por conta</h2>
+    <p class="desc">Compare o "final calculado" com o saldo real do banco. Se não bater, confira se algum lançamento ficou faltando.</p>
+    ${rows}
+  </div>`;
+}
+
+function openEditSaldoInicialModal(accountId){
+  const acc = accountById(accountId);
+  const mk = viewMonth;
+  const atual = STATE.saldoInicialPorConta[accountId]?.[mk];
+  openModal(`
+    <div class="modal-head"><h3>Saldo inicial — ${acc.nome}</h3><button class="x" onclick="closeModal()">×</button></div>
+    <p class="desc">O valor que estava na conta no começo de ${monthLabel(mk)}, conforme o extrato do banco.</p>
+    <form id="form-saldo-inicial">
+      <label>Saldo inicial de ${monthLabel(mk)}</label>
+      <input type="text" inputmode="decimal" name="valor" value="${atual!==undefined?atual.toFixed(2).replace('.',','):''}" placeholder="R$ 0,00" />
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar</button>
+    </form>`);
+  document.getElementById('form-saldo-inicial').addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const v = fd.get('valor');
+    if(!STATE.saldoInicialPorConta[accountId]) STATE.saldoInicialPorConta[accountId] = {};
+    if(v && v.trim()) STATE.saldoInicialPorConta[accountId][mk] = parseMoney(v);
+    else delete STATE.saldoInicialPorConta[accountId][mk];
+    await persist(); closeModal(); renderAll();
+  });
 }
 
 function gastosVariaveisDoMes(mk){
@@ -209,6 +332,7 @@ const TABS = [
   { id:'ajustes', label:'Ajustes', icon:'⚙' },
 ];
 let currentTab = 'lancamentos';
+let viewMonth = currentMonthKey();
 let graficoPeriodo = 'mes'; // mes | 30 | 90 | ano
 
 function renderTabbar(){
@@ -224,8 +348,29 @@ function renderTabbar(){
 
 function renderHeader(){
   const sub = document.getElementById('header-sub');
-  const mk = currentMonthKey();
-  sub.textContent = monthLabel(mk).replace(/^\w/, c=>c.toUpperCase());
+  sub.textContent = monthLabel(viewMonth).replace(/^\w/, c=>c.toUpperCase());
+}
+
+function monthNavBar(){
+  const isCurrent = viewMonth === currentMonthKey();
+  return `
+  <div class="card" style="padding:10px 14px;display:flex;align-items:center;justify-content:space-between;">
+    <button class="chip" id="btn-mes-prev" style="flex:none;">◀</button>
+    <div style="text-align:center;">
+      <div style="font-weight:600;font-size:14px;">${monthLabel(viewMonth).replace(/^\w/, c=>c.toUpperCase())}</div>
+      ${!isCurrent ? '<div style="font-size:11px;color:var(--accent);cursor:pointer;" id="btn-mes-hoje">voltar pro mês atual</div>' : '<div style="font-size:11px;color:var(--text-faint);">mês atual</div>'}
+    </div>
+    <button class="chip" id="btn-mes-next" style="flex:none;">▶</button>
+  </div>`;
+}
+
+function bindMonthNav(){
+  const p = document.getElementById('btn-mes-prev');
+  const n = document.getElementById('btn-mes-next');
+  const h = document.getElementById('btn-mes-hoje');
+  if(p) p.addEventListener('click', ()=>{ viewMonth = prevMonthKey(viewMonth); renderAll(); });
+  if(n) n.addEventListener('click', ()=>{ viewMonth = nextMonthKey(viewMonth); renderAll(); });
+  if(h) h.addEventListener('click', ()=>{ viewMonth = currentMonthKey(); renderAll(); });
 }
 
 function renderAll(){
@@ -273,8 +418,12 @@ function origemLabel(o){
   return map[o] || o;
 }
 
+function defaultDateForViewMonth(){
+  return viewMonth === currentMonthKey() ? todayISO() : `${viewMonth}-01`;
+}
+
 function viewLancamentos(){
-  const mk = currentMonthKey();
+  const mk = viewMonth;
   const es = entriesOfMonth(mk).concat(STATE.entries.filter(e=>e.tipo==='transferencia' && monthKey(e.data)===mk));
   let filtered = es;
   if(lancFiltro==='conta') filtered = es.filter(e=> e.tipo==='transferencia' || e.tipo==='receita' || (e.tipo==='despesa' && ['debito','dinheiro','pix'].includes(e.forma)));
@@ -310,6 +459,8 @@ function viewLancamentos(){
   }).join('');
 
   return `
+  ${backupReminderBanner()}
+  ${monthNavBar()}
   <div class="card">
     <div class="row" style="margin-bottom:2px;">
       <h2 style="flex:2;">Novo lançamento</h2>
@@ -366,7 +517,7 @@ function viewLancamentos(){
         </div>
         <div>
           <label>Data</label>
-          <input type="date" name="data" value="${todayISO()}" />
+          <input type="date" name="data" value="${defaultDateForViewMonth()}" />
         </div>
       </div>
 
@@ -461,6 +612,9 @@ async function addEntry(e){
 }
 
 function bindLancEvents(){
+  bindMonthNav();
+  const btnBackupLembrete = document.getElementById('btn-backup-lembrete');
+  if(btnBackupLembrete) btnBackupLembrete.addEventListener('click', exportBackup);
   const toggle = document.getElementById('tipo-toggle');
   if(toggle) toggle.querySelectorAll('button').forEach(b=>{
     b.addEventListener('click', ()=>{ lancForm.tipo = b.dataset.v; renderAll(); });
@@ -653,12 +807,14 @@ function runConsulta(){
    ABA: FATURAS  (Resumo, Entradas+Orientador, Fatura cartão, Fixos, Empréstimos)
 =========================================================== */
 function viewFaturas(){
-  const mk = currentMonthKey();
+  const mk = viewMonth;
   const { recebido, saiu, saldo } = saldoDoMes(mk);
   const cartoes = STATE.accounts.filter(a=>a.credito);
   const faturaAbertaTotal_ = cartoes.reduce((s,a)=> s + faturaAbertaTotal(a.id, mk), 0);
+  const maiorGasto = entriesOfMonth(mk).filter(e=>e.tipo==='despesa').sort((a,b)=>b.valor-a.valor)[0];
 
   return `
+  ${monthNavBar()}
   <div class="card">
     <h2>Resumo — ${monthLabel(mk)}</h2>
     <div class="grid2" style="margin-top:10px;">
@@ -679,8 +835,10 @@ function viewFaturas(){
         <div class="val neg">${fmtMoney(saiu)}</div>
       </div>
     </div>
+    ${maiorGasto ? `<p class="desc" style="margin-top:10px;">Maior gasto do mês: <b>${maiorGasto.descricao}</b> — <span class="num neg">${fmtMoney(maiorGasto.valor)}</span></p>` : ''}
   </div>
 
+  ${viewSaldoContasCard(mk)}
   ${viewEntradasCard(mk)}
   ${viewOrientadorCard(mk)}
   ${viewFaturaCartaoCard(mk)}
@@ -850,7 +1008,7 @@ function viewFaturaCartaoCard(mk){
 }
 
 function openPagarFaturaModal(accountId){
-  const mk = currentMonthKey();
+  const mk = viewMonth;
   const total = faturaAbertaTotal(accountId, mk);
   const acc = accountById(accountId);
   openModal(`
@@ -859,7 +1017,7 @@ function openPagarFaturaModal(accountId){
     <form id="form-pagar-fatura">
       <label>Valor que o banco cobrou</label>
       <input type="text" inputmode="decimal" name="valor" value="${total.toFixed(2).replace('.',',')}" required />
-      <label>Pago em</label><input type="date" name="data" value="${todayISO()}" />
+      <label>Pago em</label><input type="date" name="data" value="${defaultDateForViewMonth()}" />
       <button type="submit" class="btn" style="margin-top:14px;">Confirmar pagamento</button>
     </form>`);
   document.getElementById('form-pagar-fatura').addEventListener('submit', async e=>{
@@ -961,9 +1119,13 @@ async function lancarFixo(fixoId){
   if(!f) return;
   const acc = accountById(f.conta);
   const forma = f.debitoConta ? 'debito' : (acc.credito?'credito':'debito');
+  const [y,m] = viewMonth.split('-').map(Number);
+  const ultimoDia = new Date(y, m, 0).getDate();
+  const dia = Math.min(f.dia, ultimoDia);
+  const data = `${viewMonth}-${String(dia).padStart(2,'0')}`;
   STATE.entries.push({
     id: uid(), tipo:'despesa', forma, valor: f.valor,
-    descricao: f.descricao + (f.debitoConta?' (débito em conta)':''), conta: f.conta, categoria: f.categoria, data: todayISO(),
+    descricao: f.descricao + (f.debitoConta?' (débito em conta)':''), conta: f.conta, categoria: f.categoria, data,
     criadoEm: Date.now(), gastoFixoId: f.id
   });
   await persist(); renderAll(); showToast('Gasto fixo lançado');
@@ -1026,6 +1188,8 @@ function viewEmprestimosCard(){
 }
 
 function bindFaturasEvents(){
+  bindMonthNav();
+  document.querySelectorAll('[data-edit-saldo-inicial]').forEach(b=> b.addEventListener('click', ()=>openEditSaldoInicialModal(b.dataset.editSaldoInicial)));
   const b1 = document.getElementById('btn-nova-entrada-fixa'); if(b1) b1.addEventListener('click', openNovaEntradaFixaModal);
   const b2 = document.getElementById('btn-novo-fixo'); if(b2) b2.addEventListener('click', openNovoFixoModal);
   document.querySelectorAll('[data-pagar]').forEach(b=> b.addEventListener('click', ()=>openPagarFaturaModal(b.dataset.pagar)));
@@ -1135,7 +1299,93 @@ function viewGraficos(){
         <div class="name">${c.nome}</div>
         <input type="text" inputmode="decimal" style="width:110px;text-align:right;" data-goal="${c.id}" placeholder="sem meta" value="${STATE.goals[c.id]?STATE.goals[c.id]:''}" />
       </div>`).join('')}
+  </div>
+
+  ${viewHistoricoMensalCard()}
+  `;
+}
+
+/* ---- Histórico mensal (clicar num mês e ver o detalhe completo) ---- */
+function monthsWithData(){
+  const set = new Set();
+  STATE.entries.forEach(e=> set.add(monthKey(e.data)));
+  return [...set].sort().reverse();
+}
+
+function monthSummary(mk){
+  const es = entriesOfMonth(mk);
+  const despesas = es.filter(e=>e.tipo==='despesa');
+  const receitas = es.filter(e=>e.tipo==='receita');
+  const recebido = receitas.reduce((s,e)=>s+e.valor,0);
+  const saiu = despesas.filter(e=>['debito','dinheiro','pix'].includes(e.forma)).reduce((s,e)=>s+e.valor,0)
+    + STATE.entries.filter(e=>e.tipo==='fatura_paga' && monthKey(e.data)===mk).reduce((s,e)=>s+e.valor,0);
+  const totalGasto = despesas.reduce((s,e)=>s+e.valor,0);
+  const maior = despesas.slice().sort((a,b)=>b.valor-a.valor)[0] || null;
+  const catMap = {};
+  despesas.forEach(e=> catMap[e.categoria] = (catMap[e.categoria]||0) + e.valor );
+  const catRanking = Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([cid,v])=>({cat:categoryById(cid), valor:v}));
+  return { recebido, saiu, totalGasto, saldo: recebido - saiu, maior, catRanking, entries: es };
+}
+
+function viewHistoricoMensalCard(){
+  const meses = monthsWithData();
+  if(!meses.length) return '';
+  const rows = meses.map(mk=>{
+    const s = monthSummary(mk);
+    return `<div class="fixedline" data-mes-hist="${mk}" style="cursor:pointer;">
+      <div><div class="name">${monthLabel(mk).replace(/^\w/,c=>c.toUpperCase())}</div><div class="sub">${s.entries.length} lançamentos</div></div>
+      <div style="text-align:right;">
+        <div class="val num ${s.saldo>=0?'pos':'neg'}">${fmtMoney(s.saldo)}</div>
+        <div class="sub">gastou ${fmtMoney(s.totalGasto)}</div>
+      </div>
+    </div>`;
+  }).join('');
+  return `<div class="card">
+    <h2>Histórico mensal</h2>
+    <p class="desc">Toque num mês pra ver todos os lançamentos e o resumo daquele período.</p>
+    ${rows}
   </div>`;
+}
+
+function openMesDetalheModal(mk){
+  const s = monthSummary(mk);
+  const topCats = s.catRanking.slice(0,3).map(({cat,valor})=>
+    `<div class="orient-line"><div class="dot"></div><div><b>${cat?cat.nome:'—'}</b>: ${fmtMoney(valor)} (${Math.round(valor/(s.totalGasto||1)*100)}%)</div></div>`
+  ).join('');
+
+  let lastDate = null;
+  const listRows = s.entries.slice().sort((a,b)=> b.data.localeCompare(a.data) || (b.criadoEm||0)-(a.criadoEm||0)).map(e=>{
+    let sep = '';
+    if(e.data !== lastDate){ lastDate = e.data; sep = `<div class="date-sep">${fmtDate(e.data)}</div>`; }
+    const barClass = e.tipo==='receita' ? 'verde' : (['credito','credito_parcelado'].includes(e.forma) ? 'amarelo' : 'cinza');
+    const acc = accountById(e.conta);
+    const cat = categoryById(e.categoria);
+    const metaTxt = e.tipo==='receita' ? [origemLabel(e.origem), acc?acc.nome:''].filter(Boolean).join(' · ') : [cat?cat.nome:'', acc?acc.nome:''].filter(Boolean).join(' · ');
+    const sinal = e.tipo==='receita' ? '+' : '-';
+    const valClass = e.tipo==='receita' ? 'pos' : 'neg';
+    return sep + `
+    <div class="entry" data-id="${e.id}">
+      <div class="bar ${barClass}"></div>
+      <div class="info">
+        <div class="desc-line">${e.descricao}${e.parcelaAtual?` (${e.parcelaAtual}/${e.totalParcelas})`:''}</div>
+        <div class="meta-line">${metaTxt}</div>
+      </div>
+      <div class="val num ${valClass}">${sinal} ${fmtMoney(e.valor)}</div>
+    </div>`;
+  }).join('');
+
+  openModal(`
+    <div class="modal-head"><h3>${monthLabel(mk).replace(/^\w/,c=>c.toUpperCase())}</h3><button class="x" onclick="closeModal()">×</button></div>
+    <div class="grid3" style="margin-bottom:10px;">
+      <div class="stat"><div class="label">RECEBIDO</div><div class="val pos">${fmtMoney(s.recebido)}</div></div>
+      <div class="stat"><div class="label">SAIU</div><div class="val neg">${fmtMoney(s.saiu)}</div></div>
+      <div class="stat"><div class="label">SALDO</div><div class="val ${s.saldo>=0?'pos':'neg'}">${fmtMoney(s.saldo)}</div></div>
+    </div>
+    ${s.maior ? `<p class="desc">Maior gasto: <b>${s.maior.descricao}</b> — <span class="num">${fmtMoney(s.maior.valor)}</span></p>` : ''}
+    ${topCats ? `<p class="desc" style="margin-top:8px;margin-bottom:2px;"><b>Onde mais gastou:</b></p>${topCats}` : ''}
+    <p class="desc" style="margin-top:12px;margin-bottom:2px;"><b>Todos os lançamentos (${s.entries.length}):</b></p>
+    <div style="max-height:45vh;overflow-y:auto;">${listRows || '<div class="empty">Nada lançado neste mês.</div>'}</div>
+  `);
 }
 
 function bindGraficosEvents(){
@@ -1148,6 +1398,9 @@ function bindGraficosEvents(){
       if(v>0) STATE.goals[inp.dataset.goal] = v; else delete STATE.goals[inp.dataset.goal];
       await persist(); renderAll();
     });
+  });
+  document.querySelectorAll('[data-mes-hist]').forEach(row=>{
+    row.addEventListener('click', ()=> openMesDetalheModal(row.dataset.mesHist));
   });
 }
 
@@ -1512,15 +1765,7 @@ function bindAjustesEvents(){
   });
 
   const btnExport = document.getElementById('btn-export');
-  if(btnExport) btnExport.addEventListener('click', ()=>{
-    const blob = new Blob([JSON.stringify(STATE,null,2)], {type:'application/json'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `meufinanceiro-backup-${todayISO()}.json`;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-    showToast('Backup exportado');
-  });
+  if(btnExport) btnExport.addEventListener('click', exportBackup);
   const inputImport = document.getElementById('input-import');
   if(inputImport) inputImport.addEventListener('change', async (e)=>{
     const file = e.target.files[0]; if(!file) return;
@@ -1755,8 +2000,8 @@ function openExtratoPreviewModal(linhas){
           <div class="name">${l.descricao} ${dup?'<span style="color:var(--amber);font-size:11px;">· parece já lançado</span>':''}</div>
           <div class="sub">${l.data}</div>
           <div class="row" style="margin-top:6px;">
-            <select data-conta="${i}" style="font-size:12px;">${accountOptions()}</select>
-            <select data-cat="${i}" style="font-size:12px;">${categoryOptions()}</select>
+            <select data-conta="${i}">${accountOptions()}</select>
+            <select data-cat="${i}">${categoryOptions()}</select>
           </div>
         </div>
       </label>

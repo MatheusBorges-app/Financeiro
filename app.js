@@ -223,6 +223,7 @@ function viewSaldoContasCard(mk){
       <div class="row" style="width:100%;align-items:center;">
         <div class="name" style="flex:1;">${a.nome}</div>
         <button class="btn small secondary" data-edit-conta-saldo="${a.id}">editar</button>
+        <button class="btn small secondary" data-del-conta-saldo="${a.id}">excluir</button>
         <button class="btn small secondary" data-edit-saldo-inicial="${a.id}">saldo inicial</button>
       </div>
       <div class="grid3" style="width:100%;">
@@ -738,10 +739,16 @@ function openEditEntryModal(id){
   });
 }
 async function deleteEntry(id){
+  const entry = STATE.entries.find(e=>e.id===id);
+  if(entry && entry.tipo==='fatura_paga'){
+    // desfaz o pagamento: as compras que estavam nessa fatura voltam pra "em aberto"
+    STATE.entries.forEach(e=>{ if(e.faturaPagaId===entry.faturaPagaId) delete e.faturaPagaId; });
+  }
   STATE.entries = STATE.entries.filter(e=>e.id!==id);
   await persist();
   closeModal();
   renderAll();
+  showToast(entry && entry.tipo==='fatura_paga' ? 'Pagamento desfeito — compras voltaram pra fatura em aberto' : 'Lançamento excluído');
 }
 
 function openTransferModal(){
@@ -1193,6 +1200,10 @@ function bindFaturasEvents(){
   bindMonthNav();
   document.querySelectorAll('[data-edit-saldo-inicial]').forEach(b=> b.addEventListener('click', ()=>openEditSaldoInicialModal(b.dataset.editSaldoInicial)));
   document.querySelectorAll('[data-edit-conta-saldo]').forEach(b=> b.addEventListener('click', ()=>openEditContaModal(b.dataset.editContaSaldo)));
+  document.querySelectorAll('[data-del-conta-saldo]').forEach(b=> b.addEventListener('click', async ()=>{
+    STATE.accounts = STATE.accounts.filter(a=>a.id!==b.dataset.delContaSaldo);
+    await persist(); renderAll();
+  }));
   const btnNovaContaSaldo = document.getElementById('btn-nova-conta-saldo');
   if(btnNovaContaSaldo) btnNovaContaSaldo.addEventListener('click', openNovaContaModal);
   const b1 = document.getElementById('btn-nova-entrada-fixa'); if(b1) b1.addEventListener('click', openNovaEntradaFixaModal);

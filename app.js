@@ -19,14 +19,19 @@ const DEFAULT_STATE = () => ({
     { id: uid(), nome: 'Outros', essencial: false, favorito: false }
   ],
   entries: [],          // lançamentos (despesa/receita/transferência)
-  fixedExpenses: [],    // gastos fixos mensais
-  fixedIncomes: [],     // entradas fixas (salário etc.)
+  fixedExpenses: [],    // gastos fixos mensais (com forma: credito | debito_automatico)
+  fixedIncomes: [],     // outras entradas fixas recorrentes (fora o salário)
+  salario: {
+    bruto: 0,                 // valor mais estável, mas editável
+    liquidoPorMes: {}         // { 'AAAA-MM': valor } — muda todo mês por causa dos descontos
+  },
   goals: {},            // { categoriaId: valorMetaMensal }
   groups: [],           // grupos de gastos
   investmentTypes: [{ id: uid(), nome: 'Reserva de emergência' }],
   investments: [],      // aportes
   settings: {
     poupancaMetaPct: 15,
+    metaInvestimentoValor: null, // se preenchido, vira a meta em R$ fixo (sobrepõe o %)
     theme: 'dark'
   }
 });
@@ -71,6 +76,8 @@ async function loadState(){
       // garante que campos novos existam se o app evoluir
       const def = DEFAULT_STATE();
       for(const k in def){ if(!(k in STATE)) STATE[k] = def[k]; }
+      if(!STATE.salario) STATE.salario = def.salario;
+      if(!STATE.salario.liquidoPorMes) STATE.salario.liquidoPorMes = {};
       return;
     }
   }catch(e){ /* chave não existe ainda */ }
@@ -139,13 +146,34 @@ function gastosFixosLancadosDoMes(mk){
   return entriesOfMonth(mk).filter(e=>e.tipo==='despesa' && e.gastoFixoId).reduce((s,e)=>s+e.valor,0);
 }
 function entradaFixaDoMes(mk){
-  return STATE.fixedIncomes.reduce((s,f)=>s+f.valor,0);
+  const liquido = STATE.salario.liquidoPorMes[mk];
+  const salarioValor = (liquido!==undefined && liquido!==null) ? liquido : STATE.salario.bruto;
+  const outras = STATE.fixedIncomes.reduce((s,f)=>s+f.valor,0);
+  return salarioValor + outras;
 }
 function entradasVariaveisDoMes(mk){
   return entriesOfMonth(mk).filter(e=>e.tipo==='receita' && !e.entradaFixaId).reduce((s,e)=>s+e.valor,0);
 }
 function aportesDoMes(mk){
   return STATE.investments.filter(i=>monthKey(i.data)===mk).reduce((s,i)=>s+i.valor,0);
+}
+
+function metaInvestimentoDoMes(mk){
+  if(STATE.settings.metaInvestimentoValor) return STATE.settings.metaInvestimentoValor;
+  const entradaFixa = entradaFixaDoMes(mk);
+  return entradaFixa * (STATE.settings.poupancaMetaPct/100);
+}
+
+// maior aporte mensal já alcançado (pra sugerir elevar a meta)
+function maiorAporteMensalHistorico(excluirMk){
+  const porMes = {};
+  STATE.investments.forEach(i=>{
+    const mk = monthKey(i.data);
+    if(mk===excluirMk) return;
+    porMes[mk] = (porMes[mk]||0) + i.valor;
+  });
+  const valores = Object.values(porMes);
+  return valores.length ? Math.max(...valores) : 0;
 }
 
 function gastoPorCategoria(mk, tipo='despesa'){
@@ -240,6 +268,11 @@ let lancForm = { tipo:'despesa', forma:'debito', parcelas:1 };
 let lancFiltro = 'tudo';
 let lancBusca = '';
 
+function origemLabel(o){
+  const map = { salario:'Salário', pix:'Pix', pix_amigo:'Pix de amigo/familiar', lucro_loja:'Lucro da loja' };
+  return map[o] || o;
+}
+
 function viewLancamentos(){
   const mk = currentMonthKey();
   const es = entriesOfMonth(mk).concat(STATE.entries.filter(e=>e.tipo==='transferencia' && monthKey(e.data)===mk));
@@ -260,7 +293,9 @@ function viewLancamentos(){
     const barClass = e.tipo==='transferencia' ? 'azul' : e.tipo==='receita' ? 'verde' : (['credito','credito_parcelado'].includes(e.forma) ? 'amarelo' : 'cinza');
     const acc = accountById(e.conta);
     const cat = categoryById(e.categoria);
-    const metaTxt = e.tipo==='transferencia' ? 'transferência entre contas' : [cat?cat.nome:'', acc?acc.nome:''].filter(Boolean).join(' · ');
+    const metaTxt = e.tipo==='transferencia' ? 'transferência entre contas' :
+      e.tipo==='receita' ? [origemLabel(e.origem), acc?acc.nome:''].filter(Boolean).join(' · ') :
+      [cat?cat.nome:'', acc?acc.nome:''].filter(Boolean).join(' · ');
     const sinal = e.tipo==='receita' ? '+' : e.tipo==='transferencia' ? '⇄' : '-';
     const valClass = e.tipo==='receita' ? 'pos' : e.tipo==='transferencia' ? 'neutral' : 'neg';
     return sep + `
@@ -303,6 +338,20 @@ function viewLancamentos(){
             <option value="credito_parcelado">Crédito parcelado</option>
           </select>
         </div>
+        <div id="origem-wrap" style="${lancForm.tipo==='receita'?'':'display:none'}">
+          <label>Origem</label>
+          <select name="origem" id="origem-select">
+            <option value="salario">Salário</option>
+            <option value="pix">Pix</option>
+            <option value="pix_amigo">Pix de amigo/familiar</option>
+            <option value="lucro_loja">Lucro da loja</option>
+            <option value="outro">Outro</option>
+          </select>
+        </div>
+      </div>
+      <div id="origem-outro-wrap" style="display:none;">
+        <label>Qual origem?</label>
+        <input type="text" name="origemOutro" placeholder="Descreva a origem" />
       </div>
 
       <div id="parcelas-wrap" style="display:none;">
@@ -382,6 +431,7 @@ async function addEntry(e){
   };
   const emprestimo = fd.get('emprestimo') === 'on';
   const devedor = fd.get('devedor');
+  const origem = tipo==='receita' ? (fd.get('origem')==='outro' ? (fd.get('origemOutro')||'Outro') : fd.get('origem')) : null;
 
   if(forma === 'credito_parcelado'){
     const n = parseInt(fd.get('parcelas')||'2',10);
@@ -400,7 +450,8 @@ async function addEntry(e){
   } else {
     STATE.entries.push({
       id: uid(), tipo, forma, valor: valorTotal, ...base,
-      devedor: emprestimo ? devedor : null
+      devedor: emprestimo ? devedor : null,
+      origem: origem || null
     });
   }
   await persist();
@@ -421,6 +472,10 @@ function bindLancEvents(){
   const empChk = document.querySelector('input[name=emprestimo]');
   if(empChk) empChk.addEventListener('change', ()=>{
     document.getElementById('emprestimo-wrap').style.display = empChk.checked ? 'block':'none';
+  });
+  const origemSel = document.getElementById('origem-select');
+  if(origemSel) origemSel.addEventListener('change', ()=>{
+    document.getElementById('origem-outro-wrap').style.display = origemSel.value==='outro' ? 'block':'none';
   });
   const form = document.getElementById('form-lanc');
   if(form) form.addEventListener('submit', (e)=>{ e.preventDefault(); addEntry(e); });
@@ -457,12 +512,74 @@ function renderLancList(){
 function openEntryOptions(id){
   const e = STATE.entries.find(x=>x.id===id);
   if(!e) return;
+  if(e.tipo==='transferencia' || e.tipo==='fatura_paga'){
+    openModal(`
+      <div class="modal-head"><h3>${e.descricao}</h3><button class="x" onclick="closeModal()">×</button></div>
+      <p class="desc">${fmtDate(e.data)} · ${fmtMoney(e.valor)}</p>
+      <button class="btn danger" onclick="deleteEntry('${id}')">Excluir</button>
+    `);
+    return;
+  }
   openModal(`
     <div class="modal-head"><h3>${e.descricao}</h3><button class="x" onclick="closeModal()">×</button></div>
     <p class="desc">${fmtDate(e.data)} · ${fmtMoney(e.valor)}</p>
-    <button class="btn secondary" style="margin-bottom:8px;" onclick="closeModal()">Editar</button>
+    <button class="btn secondary" style="margin-bottom:8px;" onclick="openEditEntryModal('${id}')">Editar</button>
     <button class="btn danger" onclick="deleteEntry('${id}')">Excluir</button>
   `);
+}
+
+function openEditEntryModal(id){
+  const e = STATE.entries.find(x=>x.id===id);
+  if(!e) return;
+  const isReceita = e.tipo === 'receita';
+  openModal(`
+    <div class="modal-head"><h3>Editar lançamento</h3><button class="x" onclick="closeModal()">×</button></div>
+    ${e.totalParcelas ? `<p class="desc">Isso é a parcela ${e.parcelaAtual}/${e.totalParcelas} — editar aqui muda só esta parcela.</p>` : ''}
+    <form id="form-edit-entry">
+      <label>Descrição</label>
+      <input type="text" name="descricao" value="${(e.descricao||'').replace(/"/g,'')}" required />
+      <div class="row">
+        <div><label>Conta / Cartão</label><select name="conta">${accountOptions(e.conta)}</select></div>
+        ${!isReceita ? `<div><label>Forma</label>
+          <select name="forma">
+            <option value="debito" ${e.forma==='debito'?'selected':''}>Débito</option>
+            <option value="pix" ${e.forma==='pix'?'selected':''}>Pix</option>
+            <option value="dinheiro" ${e.forma==='dinheiro'?'selected':''}>Dinheiro</option>
+            <option value="credito" ${e.forma==='credito'?'selected':''}>Crédito</option>
+          </select>
+        </div>` : `<div><label>Origem</label>
+          <select name="origem">
+            <option value="salario" ${e.origem==='salario'?'selected':''}>Salário</option>
+            <option value="pix" ${e.origem==='pix'?'selected':''}>Pix</option>
+            <option value="pix_amigo" ${e.origem==='pix_amigo'?'selected':''}>Pix de amigo/familiar</option>
+            <option value="lucro_loja" ${e.origem==='lucro_loja'?'selected':''}>Lucro da loja</option>
+          </select>
+        </div>`}
+      </div>
+      <div class="row">
+        <div><label>Categoria</label><select name="categoria">${categoryOptions(e.categoria)}</select></div>
+        <div><label>Data</label><input type="date" name="data" value="${e.data}" /></div>
+      </div>
+      <label>Valor</label>
+      <input type="text" inputmode="decimal" name="valor" value="${(e.valor||0).toFixed(2).replace('.',',')}" required />
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar alterações</button>
+    </form>
+  `);
+  document.getElementById('form-edit-entry').addEventListener('submit', async (ev)=>{
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    e.descricao = fd.get('descricao');
+    e.conta = fd.get('conta');
+    if(!isReceita) e.forma = fd.get('forma');
+    else e.origem = fd.get('origem');
+    e.categoria = fd.get('categoria');
+    e.data = fd.get('data') || e.data;
+    e.valor = parseMoney(fd.get('valor'));
+    await persist();
+    closeModal();
+    renderAll();
+    showToast('Lançamento atualizado');
+  });
 }
 async function deleteEntry(id){
   STATE.entries = STATE.entries.filter(e=>e.id!==id);
@@ -567,6 +684,7 @@ function viewFaturas(){
   ${viewEntradasCard(mk)}
   ${viewOrientadorCard(mk)}
   ${viewFaturaCartaoCard(mk)}
+  ${viewFaturaHistoricoCard()}
   ${viewGastosFixosCard(mk)}
   ${viewEmprestimosCard()}
   `;
@@ -581,19 +699,30 @@ function viewEntradasCard(mk){
   const totalEntrou = fixa + variaveis;
   const totalGasto = fixosLancados + varGastos;
   const resultado = totalEntrou - totalGasto;
+  const liquidoRegistrado = STATE.salario.liquidoPorMes[mk];
 
   const rows = STATE.fixedIncomes.map(f=>`
     <div class="fixedline">
       <div><div class="name">${f.descricao}</div><div class="sub">todo dia ${f.dia}</div></div>
-      <div class="val num">${fmtMoney(f.valor)}</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span class="val num">${fmtMoney(f.valor)}</span>
+        <button class="btn small secondary" data-edit-entrada-fixa="${f.id}">editar</button>
+      </div>
     </div>`).join('');
 
   return `
   <div class="card">
     <h2>Entradas</h2>
-    <p class="desc">Salário e outras entradas fixas do mês.</p>
-    ${rows || '<p class="empty">Nenhuma entrada fixa cadastrada.</p>'}
-    <button class="btn ghost" id="btn-nova-entrada-fixa" style="margin-top:8px;">+ nova entrada fixa</button>
+    <p class="desc">Salário fica em duas partes: o bruto (mais estável) e o líquido de cada mês (muda com os descontos).</p>
+
+    <label>Salário bruto <span style="color:var(--text-faint);">(editável, mas fica fixo entre os meses)</span></label>
+    <input type="text" inputmode="decimal" id="input-salario-bruto" value="${STATE.salario.bruto ? STATE.salario.bruto.toFixed(2).replace('.',',') : ''}" placeholder="R$ 0,00" />
+
+    <label>Salário líquido — ${monthLabel(mk)} <span style="color:var(--text-faint);">(o que caiu de fato este mês)</span></label>
+    <input type="text" inputmode="decimal" id="input-salario-liquido" value="${liquidoRegistrado!==undefined?liquidoRegistrado.toFixed(2).replace('.',','):''}" placeholder="ainda não informado — usando o bruto como estimativa" />
+
+    ${rows}
+    <button class="btn ghost" id="btn-nova-entrada-fixa" style="margin-top:8px;">+ outra entrada fixa (além do salário)</button>
 
     <div class="grid3" style="margin-top:14px;">
       <div class="stat"><div class="label">ENTRADA FIXA</div><div class="val pos">${fmtMoney(fixa)}</div></div>
@@ -604,11 +733,37 @@ function viewEntradasCard(mk){
   </div>`;
 }
 
+function openEditEntradaFixaModal(id){
+  const f = STATE.fixedIncomes.find(x=>x.id===id);
+  if(!f) return;
+  openModal(`
+    <div class="modal-head"><h3>Editar entrada fixa</h3><button class="x" onclick="closeModal()">×</button></div>
+    <form id="form-edit-entrada-fixa">
+      <label>Descrição</label><input type="text" name="descricao" value="${f.descricao}" required />
+      <label>Valor mensal</label><input type="text" inputmode="decimal" name="valor" value="${f.valor.toFixed(2).replace('.',',')}" required />
+      <label>Todo dia</label><input type="number" name="dia" min="1" max="31" value="${f.dia}" />
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar</button>
+    </form>
+    <button class="btn danger" id="btn-del-entrada-fixa" style="margin-top:8px;">Excluir</button>
+  `);
+  document.getElementById('form-edit-entrada-fixa').addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    f.descricao = fd.get('descricao'); f.valor = parseMoney(fd.get('valor')); f.dia = parseInt(fd.get('dia')||'5',10);
+    await persist(); closeModal(); renderAll();
+  });
+  document.getElementById('btn-del-entrada-fixa').addEventListener('click', async ()=>{
+    STATE.fixedIncomes = STATE.fixedIncomes.filter(x=>x.id!==id);
+    await persist(); closeModal(); renderAll();
+  });
+}
+
 function openNovaEntradaFixaModal(){
   openModal(`
     <div class="modal-head"><h3>Nova entrada fixa</h3><button class="x" onclick="closeModal()">×</button></div>
+    <p class="desc">Pra outra renda fixa além do salário (ex: aluguel recebido, pensão).</p>
     <form id="form-entrada-fixa">
-      <label>Descrição</label><input type="text" name="descricao" placeholder="Ex: Salário" required />
+      <label>Descrição</label><input type="text" name="descricao" placeholder="Ex: Aluguel recebido" required />
       <label>Valor mensal</label><input type="text" inputmode="decimal" name="valor" placeholder="R$ 0,00" required />
       <label>Todo dia</label><input type="number" name="dia" min="1" max="31" value="5" />
       <button type="submit" class="btn" style="margin-top:14px;">Salvar</button>
@@ -621,17 +776,17 @@ function openNovaEntradaFixaModal(){
   });
 }
 
-/* ---- Orientador financeiro (meta de 15%) ---- */
+/* ---- Orientador financeiro ---- */
 function viewOrientadorCard(mk){
   const fixa = entradaFixaDoMes(mk);
-  const pct = STATE.settings.poupancaMetaPct;
-  const metaValor = fixa * (pct/100);
+  const metaValor = metaInvestimentoDoMes(mk);
   const { saldo: sobraCaixa } = saldoDoMes(mk);
   const aportado = aportesDoMes(mk);
   const progresso = metaValor>0 ? Math.min(100, Math.round((aportado/metaValor)*100)) : 0;
+  const recorde = maiorAporteMensalHistorico(mk);
 
-  if(fixa === 0){
-    return `<div class="card"><h2>Orientador financeiro</h2><p class="desc">Cadastre sua entrada fixa acima pra eu calcular sua meta de poupança (${pct}%) e começar a te orientar.</p></div>`;
+  if(fixa === 0 && !STATE.settings.metaInvestimentoValor){
+    return `<div class="card"><h2>Orientador financeiro</h2><p class="desc">Cadastre seu salário acima (ou defina uma meta de investimento fixa em Ajustes) pra eu começar a te orientar.</p></div>`;
   }
 
   // categorias flexíveis que mais fugiram da média
@@ -645,22 +800,28 @@ function viewOrientadorCard(mk){
 
   let orientLines = '';
   if(sobraCaixa - aportado > 0 && aportado < metaValor){
-    orientLines += `<div class="orient-line"><div class="dot"></div><div>Você tem ${fmtMoney(sobraCaixa - aportado)} de sobra que ainda não virou aporte. Guardar isso bate parte da sua meta de ${pct}%.</div></div>`;
+    orientLines += `<div class="orient-line"><div class="dot"></div><div>Você tem ${fmtMoney(sobraCaixa - aportado)} de sobra que ainda não virou aporte. Guardar isso ajuda a fechar o mês na meta.</div></div>`;
   }
   if(desvios.length){
     const top = desvios[0];
-    orientLines += `<div class="orient-line"><div class="dot"></div><div>Maior vilão do mês: <b>${top.cat.nome}</b>, ${fmtMoney(top.desvio)} acima da sua média. Cortando isso, fica mais fácil bater a meta no mês que vem.</div></div>`;
+    orientLines += `<div class="orient-line"><div class="dot"></div><div>Maior vilão do mês: <b>${top.cat.nome}</b>, ${fmtMoney(top.desvio)} acima da sua média. Cortando isso, sobra mais pra investir.</div></div>`;
   } else {
     orientLines += `<div class="orient-line"><div class="dot"></div><div>Nenhuma categoria flexível fugiu muito da sua média este mês. Bom sinal.</div></div>`;
   }
   if(progresso >= 100){
-    orientLines += `<div class="orient-line"><div class="dot" style="background:var(--accent)"></div><div>Meta de ${pct}% batida este mês. 🎉</div></div>`;
+    if(recorde>0 && aportado>recorde){
+      orientLines += `<div class="orient-line"><div class="dot" style="background:var(--accent)"></div><div>Meta batida e você já superou seu recorde anterior (${fmtMoney(recorde)}). 🎉</div></div>`;
+    } else {
+      orientLines += `<div class="orient-line"><div class="dot" style="background:var(--accent)"></div><div>Meta do mês batida. 🎉</div></div>`;
+    }
+  } else if(recorde>0){
+    orientLines += `<div class="orient-line"><div class="dot"></div><div>Seu recorde de aporte num mês foi ${fmtMoney(recorde)}. Vale tentar chegar perto disso — ou passar.</div></div>`;
   }
 
   return `
   <div class="card">
     <h2>Orientador financeiro</h2>
-    <p class="desc">Meta: guardar ${pct}% da sua entrada fixa = <span class="num" style="color:var(--text)">${fmtMoney(metaValor)}</span></p>
+    <p class="desc">Meta do mês: <span class="num" style="color:var(--text)">${fmtMoney(metaValor)}</span> ${!STATE.settings.metaInvestimentoValor?'<span style="color:var(--text-faint);">(estimativa de 15% do salário — defina um valor fixo em Ajustes)</span>':''}</p>
     <div class="catbar-wrap">
       <div class="catbar-head"><span>Guardado (aportado)</span><span class="num">${fmtMoney(aportado)} de ${fmtMoney(metaValor)}</span></div>
       <div class="catbar-track"><div class="catbar-fill under" style="width:${progresso}%"></div></div>
@@ -723,11 +884,13 @@ function viewGastosFixosCard(mk){
   const rows = STATE.fixedExpenses.map(f=>{
     const lancado = entriesOfMonth(mk).some(e=>e.gastoFixoId===f.id);
     const acc = accountById(f.conta);
+    const tagDebito = f.debitoConta ? ' · débito em conta' : '';
     return `<div class="fixedline">
-      <div><div class="name">${f.descricao}</div><div class="sub">${acc?acc.nome:''} · todo dia ${f.dia} · ${lancado?'lançado':'ainda não lançado'}</div></div>
+      <div><div class="name">${f.descricao}</div><div class="sub">${acc?acc.nome:''} · todo dia ${f.dia}${tagDebito} · ${lancado?'lançado':'ainda não lançado'}</div></div>
       <div style="display:flex;align-items:center;gap:8px;">
         <span class="val num neg">${fmtMoney(f.valor)}</span>
         ${!lancado?`<button class="btn small secondary" data-lancar-fixo="${f.id}">lançar</button>`:''}
+        <button class="btn small secondary" data-edit-fixo="${f.id}">editar</button>
       </div>
     </div>`;
   }).join('');
@@ -749,25 +912,94 @@ function openNovoFixoModal(){
       <label>Todo dia</label><input type="number" name="dia" min="1" max="31" value="5" />
       <label>Conta / Cartão</label><select name="conta">${accountOptions()}</select>
       <label>Categoria</label><select name="categoria">${categoryOptions()}</select>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:12px;">
+        <input type="checkbox" name="debitoConta" style="width:auto;" /> É débito em conta (desconta direto, mesmo sendo cartão)
+      </label>
       <button type="submit" class="btn" style="margin-top:14px;">Salvar gasto fixo</button>
     </form>`);
   document.getElementById('form-fixo').addEventListener('submit', async e=>{
     e.preventDefault();
     const fd = new FormData(e.target);
-    STATE.fixedExpenses.push({ id: uid(), descricao: fd.get('descricao'), valor: parseMoney(fd.get('valor')), dia: parseInt(fd.get('dia')||'5',10), conta: fd.get('conta'), categoria: fd.get('categoria') });
+    STATE.fixedExpenses.push({ id: uid(), descricao: fd.get('descricao'), valor: parseMoney(fd.get('valor')), dia: parseInt(fd.get('dia')||'5',10), conta: fd.get('conta'), categoria: fd.get('categoria'), debitoConta: fd.get('debitoConta')==='on' });
     await persist(); closeModal(); renderAll();
   });
 }
+
+function openEditFixoModal(id){
+  const f = STATE.fixedExpenses.find(x=>x.id===id);
+  if(!f) return;
+  openModal(`
+    <div class="modal-head"><h3>Editar gasto fixo</h3><button class="x" onclick="closeModal()">×</button></div>
+    <form id="form-edit-fixo">
+      <label>Descrição</label><input type="text" name="descricao" value="${f.descricao}" required />
+      <label>Valor mensal</label><input type="text" inputmode="decimal" name="valor" value="${f.valor.toFixed(2).replace('.',',')}" required />
+      <label>Todo dia</label><input type="number" name="dia" min="1" max="31" value="${f.dia}" />
+      <label>Conta / Cartão</label><select name="conta">${accountOptions(f.conta)}</select>
+      <label>Categoria</label><select name="categoria">${categoryOptions(f.categoria)}</select>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:12px;">
+        <input type="checkbox" name="debitoConta" style="width:auto;" ${f.debitoConta?'checked':''} /> É débito em conta (desconta direto, mesmo sendo cartão)
+      </label>
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar alterações</button>
+    </form>
+    <button class="btn danger" id="btn-del-fixo" style="margin-top:8px;">Excluir gasto fixo</button>
+  `);
+  document.getElementById('form-edit-fixo').addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    f.descricao = fd.get('descricao'); f.valor = parseMoney(fd.get('valor')); f.dia = parseInt(fd.get('dia')||'5',10);
+    f.conta = fd.get('conta'); f.categoria = fd.get('categoria'); f.debitoConta = fd.get('debitoConta')==='on';
+    await persist(); closeModal(); renderAll();
+  });
+  document.getElementById('btn-del-fixo').addEventListener('click', async ()=>{
+    STATE.fixedExpenses = STATE.fixedExpenses.filter(x=>x.id!==id);
+    await persist(); closeModal(); renderAll();
+  });
+}
+
 async function lancarFixo(fixoId){
   const f = STATE.fixedExpenses.find(x=>x.id===fixoId);
   if(!f) return;
   const acc = accountById(f.conta);
+  const forma = f.debitoConta ? 'debito' : (acc.credito?'credito':'debito');
   STATE.entries.push({
-    id: uid(), tipo:'despesa', forma: acc.credito?'credito':'debito', valor: f.valor,
-    descricao: f.descricao, conta: f.conta, categoria: f.categoria, data: todayISO(),
+    id: uid(), tipo:'despesa', forma, valor: f.valor,
+    descricao: f.descricao + (f.debitoConta?' (débito em conta)':''), conta: f.conta, categoria: f.categoria, data: todayISO(),
     criadoEm: Date.now(), gastoFixoId: f.id
   });
   await persist(); renderAll(); showToast('Gasto fixo lançado');
+}
+
+function faturaHistoricoPorMes(accountId, n=6){
+  const now = new Date();
+  const out = [];
+  for(let i=0;i<n;i++){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    const mk = d.toISOString().slice(0,7);
+    const total = STATE.entries.filter(e=>e.tipo==='despesa' && e.conta===accountId && ['credito','credito_parcelado'].includes(e.forma) && monthKey(e.data)===mk).reduce((s,e)=>s+e.valor,0);
+    const paga = STATE.entries.some(e=>e.tipo==='fatura_paga' && e.conta===accountId && monthKey(e.data)===mk);
+    out.push({ mk, total, paga });
+  }
+  return out;
+}
+
+function viewFaturaHistoricoCard(){
+  const cartoes = STATE.accounts.filter(a=>a.credito);
+  if(!cartoes.length) return '';
+  const blocks = cartoes.map(a=>{
+    const hist = faturaHistoricoPorMes(a.id, 6).filter(h=>h.total>0);
+    if(!hist.length) return '';
+    const rows = hist.map(h=>`
+      <div class="fixedline">
+        <div class="name">${monthLabel(h.mk).replace(/^\w/,c=>c.toUpperCase())}</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="val num">${fmtMoney(h.total)}</span>
+          <span style="font-size:11px;color:${h.paga?'var(--green)':'var(--amber)'};">${h.paga?'paga':'em aberto'}</span>
+        </div>
+      </div>`).join('');
+    return `<h2 style="margin-top:14px;">${a.nome}</h2>${rows}`;
+  }).join('');
+  if(!blocks.trim()) return '';
+  return `<div class="card"><h2>Histórico de fatura</h2><p class="desc">Últimos meses, por cartão.</p>${blocks}</div>`;
 }
 
 /* ---- Empréstimos ---- */
@@ -798,6 +1030,21 @@ function bindFaturasEvents(){
   const b2 = document.getElementById('btn-novo-fixo'); if(b2) b2.addEventListener('click', openNovoFixoModal);
   document.querySelectorAll('[data-pagar]').forEach(b=> b.addEventListener('click', ()=>openPagarFaturaModal(b.dataset.pagar)));
   document.querySelectorAll('[data-lancar-fixo]').forEach(b=> b.addEventListener('click', ()=>lancarFixo(b.dataset.lancarFixo)));
+  document.querySelectorAll('[data-edit-fixo]').forEach(b=> b.addEventListener('click', ()=>openEditFixoModal(b.dataset.editFixo)));
+  document.querySelectorAll('[data-edit-entrada-fixa]').forEach(b=> b.addEventListener('click', ()=>openEditEntradaFixaModal(b.dataset.editEntradaFixa)));
+
+  const bruto = document.getElementById('input-salario-bruto');
+  if(bruto) bruto.addEventListener('change', async ()=>{
+    STATE.salario.bruto = parseMoney(bruto.value);
+    await persist(); renderAll();
+  });
+  const liquido = document.getElementById('input-salario-liquido');
+  if(liquido) liquido.addEventListener('change', async ()=>{
+    const mk = currentMonthKey();
+    const v = parseMoney(liquido.value);
+    if(v>0) STATE.salario.liquidoPorMes[mk] = v; else delete STATE.salario.liquidoPorMes[mk];
+    await persist(); renderAll();
+  });
 }
 
 /* ===========================================================
@@ -910,7 +1157,7 @@ function bindGraficosEvents(){
 function viewGrupos(){
   const rows = STATE.groups.map(g=>{
     const total = STATE.entries.filter(e=>e.grupo===g.id && e.tipo==='despesa').reduce((s,e)=>s+e.valor,0);
-    return `<div class="fixedline">
+    return `<div class="fixedline" data-grupo-row="${g.id}" style="cursor:pointer;">
       <div><div class="name">${g.nome}</div><div class="sub">${g.encerrado?'encerrado':'em aberto'}</div></div>
       <div class="val num neg">${fmtMoney(total)}</div>
     </div>`;
@@ -921,6 +1168,29 @@ function viewGrupos(){
     ${rows || '<p class="empty">Nenhum grupo criado ainda.</p>'}
     <button class="btn ghost" id="btn-novo-grupo" style="margin-top:8px;">+ novo grupo</button>
   </div>`;
+}
+function openEditGrupoModal(id){
+  const g = STATE.groups.find(x=>x.id===id);
+  if(!g) return;
+  openModal(`<div class="modal-head"><h3>Editar grupo</h3><button class="x" onclick="closeModal()">×</button></div>
+    <form id="form-edit-grupo">
+      <label>Nome do grupo</label><input type="text" name="nome" value="${g.nome}" required />
+      <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+        <input type="checkbox" name="encerrado" style="width:auto;" ${g.encerrado?'checked':''} /> Encerrado
+      </label>
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar</button>
+    </form>
+    <button class="btn danger" id="btn-del-grupo" style="margin-top:8px;">Excluir grupo</button>`);
+  document.getElementById('form-edit-grupo').addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    g.nome = fd.get('nome'); g.encerrado = fd.get('encerrado')==='on';
+    await persist(); closeModal(); renderAll();
+  });
+  document.getElementById('btn-del-grupo').addEventListener('click', async ()=>{
+    STATE.groups = STATE.groups.filter(x=>x.id!==id);
+    await persist(); closeModal(); renderAll();
+  });
 }
 function bindGruposEvents(){
   const b = document.getElementById('btn-novo-grupo');
@@ -934,6 +1204,9 @@ function bindGruposEvents(){
       await persist(); closeModal(); renderAll();
     });
   });
+  document.querySelectorAll('[data-grupo-row]').forEach(row=>{
+    row.addEventListener('click', ()=>openEditGrupoModal(row.dataset.grupoRow));
+  });
 }
 
 /* ===========================================================
@@ -945,6 +1218,16 @@ function viewInvestim(){
     const soma = STATE.investments.filter(i=>i.tipo===t.id).reduce((s,i)=>s+i.valor,0);
     return `<div class="fixedline"><div class="name">${t.nome}</div><div class="val num pos">${fmtMoney(soma)}</div></div>`;
   }).join('');
+  const recentes = STATE.investments.slice().sort((a,b)=>b.data.localeCompare(a.data)).slice(0,15).map(i=>{
+    const t = STATE.investmentTypes.find(x=>x.id===i.tipo);
+    return `<div class="fixedline">
+      <div><div class="name">${t?t.nome:'—'}</div><div class="sub">${fmtDate(i.data)}</div></div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span class="val num pos">${fmtMoney(i.valor)}</span>
+        <button class="btn small secondary" data-edit-aporte="${i.id}">editar</button>
+      </div>
+    </div>`;
+  }).join('');
   return `
   <div class="card">
     <h2>Total aportado</h2>
@@ -954,7 +1237,33 @@ function viewInvestim(){
     <h2>Por tipo de ativo</h2>
     ${rows || '<p class="empty">Nenhum tipo cadastrado.</p>'}
     <button class="btn ghost" id="btn-novo-aporte" style="margin-top:8px;">+ novo aporte</button>
+  </div>
+  <div class="card">
+    <h2>Últimos aportes</h2>
+    ${recentes || '<p class="empty">Nenhum aporte lançado ainda.</p>'}
   </div>`;
+}
+function openEditAporteModal(id){
+  const i = STATE.investments.find(x=>x.id===id);
+  if(!i) return;
+  openModal(`<div class="modal-head"><h3>Editar aporte</h3><button class="x" onclick="closeModal()">×</button></div>
+    <form id="form-edit-aporte">
+      <label>Valor</label><input type="text" inputmode="decimal" name="valor" value="${i.valor.toFixed(2).replace('.',',')}" required />
+      <label>Tipo de ativo</label><select name="tipo">${STATE.investmentTypes.map(t=>`<option value="${t.id}" ${t.id===i.tipo?'selected':''}>${t.nome}</option>`).join('')}</select>
+      <label>Data</label><input type="date" name="data" value="${i.data}" />
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar</button>
+    </form>
+    <button class="btn danger" id="btn-del-aporte" style="margin-top:8px;">Excluir aporte</button>`);
+  document.getElementById('form-edit-aporte').addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    i.valor = parseMoney(fd.get('valor')); i.tipo = fd.get('tipo'); i.data = fd.get('data')||i.data;
+    await persist(); closeModal(); renderAll();
+  });
+  document.getElementById('btn-del-aporte').addEventListener('click', async ()=>{
+    STATE.investments = STATE.investments.filter(x=>x.id!==id);
+    await persist(); closeModal(); renderAll();
+  });
 }
 function bindInvestimEvents(){
   const b = document.getElementById('btn-novo-aporte');
@@ -973,6 +1282,7 @@ function bindInvestimEvents(){
       await persist(); closeModal(); renderAll();
     });
   });
+  document.querySelectorAll('[data-edit-aporte]').forEach(b=> b.addEventListener('click', ()=>openEditAporteModal(b.dataset.editAporte)));
 }
 
 /* ===========================================================
@@ -982,7 +1292,10 @@ function viewAjustes(){
   const accRows = STATE.accounts.map(a=>`
     <div class="fixedline">
       <div><div class="name">${a.favorito?'★ ':''}${a.nome}</div><div class="sub">${a.credito?`crédito · fecha dia ${a.fechamento||'—'} · vence dia ${a.vencimento||'—'}`:'sem crédito'}</div></div>
-      <button class="btn small secondary" data-del-acc="${a.id}">excluir</button>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="btn small secondary" data-edit-acc="${a.id}">editar</button>
+        <button class="btn small secondary" data-del-acc="${a.id}">excluir</button>
+      </div>
     </div>`).join('');
   const catRows = STATE.categories.map(c=>`
     <div class="fixedline">
@@ -991,7 +1304,16 @@ function viewAjustes(){
         <label style="display:flex;align-items:center;gap:4px;font-size:11.5px;margin:0;color:var(--text-dim);">
           <input type="checkbox" data-essencial="${c.id}" ${c.essencial?'checked':''} style="width:auto;" /> essencial
         </label>
+        <button class="btn small secondary" data-edit-cat="${c.id}">editar</button>
         <button class="btn small secondary" data-del-cat="${c.id}">excluir</button>
+      </div>
+    </div>`).join('');
+  const invTypeRows = STATE.investmentTypes.map(t=>`
+    <div class="fixedline">
+      <div class="name">${t.nome}</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="btn small secondary" data-edit-invtype="${t.id}">editar</button>
+        <button class="btn small secondary" data-del-invtype="${t.id}">excluir</button>
       </div>
     </div>`).join('');
 
@@ -1010,9 +1332,15 @@ function viewAjustes(){
   </div>
 
   <div class="card">
-    <h2>Meta de poupança</h2>
-    <label>Percentual da entrada fixa a guardar por mês</label>
-    <input type="number" id="input-meta-pct" value="${STATE.settings.poupancaMetaPct}" min="1" max="100" />
+    <h2>Tipos de investimento</h2>
+    ${invTypeRows}
+    <button class="btn ghost" id="btn-novo-invtype" style="margin-top:8px;">+ novo tipo</button>
+  </div>
+
+  <div class="card">
+    <h2>Meta de investimento mensal</h2>
+    <p class="desc">O valor mínimo que você quer conseguir investir todo mês. Deixe em branco pra eu estimar 15% do seu salário.</p>
+    <input type="text" inputmode="decimal" id="input-meta-valor" value="${STATE.settings.metaInvestimentoValor?STATE.settings.metaInvestimentoValor.toFixed(2).replace('.',','):''}" placeholder="R$ 0,00" />
   </div>
 
   <div class="card">
@@ -1025,6 +1353,74 @@ function viewAjustes(){
     </label>
   </div>
   `;
+}
+
+function openEditContaModal(id){
+  const a = STATE.accounts.find(x=>x.id===id);
+  if(!a) return;
+  openModal(`<div class="modal-head"><h3>Editar conta</h3><button class="x" onclick="closeModal()">×</button></div>
+    <form id="form-edit-conta">
+      <label>Nome da conta / cartão</label><input type="text" name="nome" value="${a.nome}" required />
+      <label style="display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" name="credito" id="chk-credito-edit" style="width:auto;" ${a.credito?'checked':''} /> Tem cartão de crédito
+      </label>
+      <div id="cred-fields-edit" style="display:${a.credito?'block':'none'};">
+        <div class="row">
+          <div><label>Fecha no dia</label><input type="number" name="fechamento" min="1" max="31" value="${a.fechamento||''}" /></div>
+          <div><label>Vence no dia</label><input type="number" name="vencimento" min="1" max="31" value="${a.vencimento||''}" /></div>
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+        <input type="checkbox" name="favorito" style="width:auto;" ${a.favorito?'checked':''} /> Favorita
+      </label>
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar</button>
+    </form>`);
+  document.getElementById('chk-credito-edit').addEventListener('change', (e)=>{
+    document.getElementById('cred-fields-edit').style.display = e.target.checked?'block':'none';
+  });
+  document.getElementById('form-edit-conta').addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    a.nome = fd.get('nome'); a.credito = fd.get('credito')==='on';
+    a.fechamento = fd.get('fechamento')?parseInt(fd.get('fechamento'),10):null;
+    a.vencimento = fd.get('vencimento')?parseInt(fd.get('vencimento'),10):null;
+    a.favorito = fd.get('favorito')==='on';
+    await persist(); closeModal(); renderAll();
+  });
+}
+
+function openEditCategoriaModal(id){
+  const c = categoryById(id);
+  if(!c) return;
+  openModal(`<div class="modal-head"><h3>Editar categoria</h3><button class="x" onclick="closeModal()">×</button></div>
+    <form id="form-edit-cat">
+      <label>Nome</label><input type="text" name="nome" value="${c.nome}" required />
+      <label style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+        <input type="checkbox" name="favorito" style="width:auto;" ${c.favorito?'checked':''} /> Favorita (aparece primeiro nas listas)
+      </label>
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar</button>
+    </form>`);
+  document.getElementById('form-edit-cat').addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    c.nome = fd.get('nome'); c.favorito = fd.get('favorito')==='on';
+    await persist(); closeModal(); renderAll();
+  });
+}
+
+function openEditInvTypeModal(id){
+  const t = STATE.investmentTypes.find(x=>x.id===id);
+  if(!t) return;
+  openModal(`<div class="modal-head"><h3>Editar tipo</h3><button class="x" onclick="closeModal()">×</button></div>
+    <form id="form-edit-invtype">
+      <label>Nome</label><input type="text" name="nome" value="${t.nome}" required />
+      <button type="submit" class="btn" style="margin-top:14px;">Salvar</button>
+    </form>`);
+  document.getElementById('form-edit-invtype').addEventListener('submit', async e=>{
+    e.preventDefault();
+    t.nome = new FormData(e.target).get('nome');
+    await persist(); closeModal(); renderAll();
+  });
 }
 
 function bindAjustesEvents(){
@@ -1064,6 +1460,7 @@ function bindAjustesEvents(){
     STATE.accounts = STATE.accounts.filter(a=>a.id!==b.dataset.delAcc);
     await persist(); renderAll();
   }));
+  document.querySelectorAll('[data-edit-acc]').forEach(b=> b.addEventListener('click', ()=>openEditContaModal(b.dataset.editAcc)));
 
   const b2 = document.getElementById('btn-nova-cat');
   if(b2) b2.addEventListener('click', ()=>{
@@ -1084,14 +1481,33 @@ function bindAjustesEvents(){
     STATE.categories = STATE.categories.filter(c=>c.id!==b.dataset.delCat);
     await persist(); renderAll();
   }));
+  document.querySelectorAll('[data-edit-cat]').forEach(b=> b.addEventListener('click', ()=>openEditCategoriaModal(b.dataset.editCat)));
   document.querySelectorAll('[data-essencial]').forEach(chk=> chk.addEventListener('change', async ()=>{
     const c = categoryById(chk.dataset.essencial); c.essencial = chk.checked;
     await persist();
   }));
 
-  const metaInput = document.getElementById('input-meta-pct');
-  if(metaInput) metaInput.addEventListener('change', async ()=>{
-    STATE.settings.poupancaMetaPct = parseInt(metaInput.value,10)||15;
+  const b3 = document.getElementById('btn-novo-invtype');
+  if(b3) b3.addEventListener('click', ()=>{
+    openModal(`<div class="modal-head"><h3>Novo tipo de investimento</h3><button class="x" onclick="closeModal()">×</button></div>
+    <form id="form-invtype"><label>Nome</label><input type="text" name="nome" required />
+    <button type="submit" class="btn" style="margin-top:14px;">Salvar</button></form>`);
+    document.getElementById('form-invtype').addEventListener('submit', async e=>{
+      e.preventDefault();
+      STATE.investmentTypes.push({ id: uid(), nome: new FormData(e.target).get('nome') });
+      await persist(); closeModal(); renderAll();
+    });
+  });
+  document.querySelectorAll('[data-edit-invtype]').forEach(b=> b.addEventListener('click', ()=>openEditInvTypeModal(b.dataset.editInvtype)));
+  document.querySelectorAll('[data-del-invtype]').forEach(b=> b.addEventListener('click', async ()=>{
+    STATE.investmentTypes = STATE.investmentTypes.filter(t=>t.id!==b.dataset.delInvtype);
+    await persist(); renderAll();
+  }));
+
+  const metaValorInput = document.getElementById('input-meta-valor');
+  if(metaValorInput) metaValorInput.addEventListener('change', async ()=>{
+    const v = parseMoney(metaValorInput.value);
+    STATE.settings.metaInvestimentoValor = v>0 ? v : null;
     await persist(); renderAll();
   });
 

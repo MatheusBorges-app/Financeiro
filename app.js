@@ -235,6 +235,7 @@ function viewSaldoContasCard(mk){
     <h2>Saldo por conta</h2>
     <p class="desc">Compare o "final calculado" com o saldo real do banco. Se não bater, confira se algum lançamento ficou faltando.</p>
     ${rows}
+    <button class="btn ghost" id="btn-nova-conta-saldo" style="margin-top:8px;">+ nova conta</button>
   </div>`;
 }
 
@@ -1190,6 +1191,8 @@ function viewEmprestimosCard(){
 function bindFaturasEvents(){
   bindMonthNav();
   document.querySelectorAll('[data-edit-saldo-inicial]').forEach(b=> b.addEventListener('click', ()=>openEditSaldoInicialModal(b.dataset.editSaldoInicial)));
+  const btnNovaContaSaldo = document.getElementById('btn-nova-conta-saldo');
+  if(btnNovaContaSaldo) btnNovaContaSaldo.addEventListener('click', openNovaContaModal);
   const b1 = document.getElementById('btn-nova-entrada-fixa'); if(b1) b1.addEventListener('click', openNovaEntradaFixaModal);
   const b2 = document.getElementById('btn-novo-fixo'); if(b2) b2.addEventListener('click', openNovoFixoModal);
   document.querySelectorAll('[data-pagar]').forEach(b=> b.addEventListener('click', ()=>openPagarFaturaModal(b.dataset.pagar)));
@@ -1608,6 +1611,37 @@ function viewAjustes(){
   `;
 }
 
+function openNovaContaModal(){
+  openModal(`<div class="modal-head"><h3>Nova conta</h3><button class="x" onclick="closeModal()">×</button></div>
+  <form id="form-conta">
+    <label>Nome da conta / cartão</label><input type="text" name="nome" placeholder="Ex: Nubank, Itaú" required />
+    <label style="display:flex;align-items:center;gap:6px;">
+      <input type="checkbox" name="credito" id="chk-credito" style="width:auto;" /> Tem cartão de crédito
+    </label>
+    <div id="cred-fields" style="display:none;">
+      <div class="row">
+        <div><label>Fecha no dia</label><input type="number" name="fechamento" min="1" max="31" /></div>
+        <div><label>Vence no dia</label><input type="number" name="vencimento" min="1" max="31" /></div>
+      </div>
+    </div>
+    <button type="submit" class="btn" style="margin-top:14px;">Salvar conta</button>
+  </form>`);
+  document.getElementById('chk-credito').addEventListener('change', (e)=>{
+    document.getElementById('cred-fields').style.display = e.target.checked?'block':'none';
+  });
+  document.getElementById('form-conta').addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    STATE.accounts.push({
+      id: uid(), nome: fd.get('nome'), credito: fd.get('credito')==='on',
+      fechamento: fd.get('fechamento')?parseInt(fd.get('fechamento'),10):null,
+      vencimento: fd.get('vencimento')?parseInt(fd.get('vencimento'),10):null,
+      favorito:false
+    });
+    await persist(); closeModal(); renderAll();
+  });
+}
+
 function openEditContaModal(id){
   const a = STATE.accounts.find(x=>x.id===id);
   if(!a) return;
@@ -1678,36 +1712,7 @@ function openEditInvTypeModal(id){
 
 function bindAjustesEvents(){
   const b1 = document.getElementById('btn-nova-conta');
-  if(b1) b1.addEventListener('click', ()=>{
-    openModal(`<div class="modal-head"><h3>Nova conta</h3><button class="x" onclick="closeModal()">×</button></div>
-    <form id="form-conta">
-      <label>Nome da conta / cartão</label><input type="text" name="nome" required />
-      <label style="display:flex;align-items:center;gap:6px;">
-        <input type="checkbox" name="credito" id="chk-credito" style="width:auto;" /> Tem cartão de crédito
-      </label>
-      <div id="cred-fields" style="display:none;">
-        <div class="row">
-          <div><label>Fecha no dia</label><input type="number" name="fechamento" min="1" max="31" /></div>
-          <div><label>Vence no dia</label><input type="number" name="vencimento" min="1" max="31" /></div>
-        </div>
-      </div>
-      <button type="submit" class="btn" style="margin-top:14px;">Salvar conta</button>
-    </form>`);
-    document.getElementById('chk-credito').addEventListener('change', (e)=>{
-      document.getElementById('cred-fields').style.display = e.target.checked?'block':'none';
-    });
-    document.getElementById('form-conta').addEventListener('submit', async e=>{
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      STATE.accounts.push({
-        id: uid(), nome: fd.get('nome'), credito: fd.get('credito')==='on',
-        fechamento: fd.get('fechamento')?parseInt(fd.get('fechamento'),10):null,
-        vencimento: fd.get('vencimento')?parseInt(fd.get('vencimento'),10):null,
-        favorito:false
-      });
-      await persist(); closeModal(); renderAll();
-    });
-  });
+  if(b1) b1.addEventListener('click', openNovaContaModal);
 
   document.querySelectorAll('[data-del-acc]').forEach(b=> b.addEventListener('click', async ()=>{
     STATE.accounts = STATE.accounts.filter(a=>a.id!==b.dataset.delAcc);

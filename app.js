@@ -222,6 +222,7 @@ function viewSaldoContasCard(mk){
     <div class="fixedline" style="align-items:flex-start;flex-direction:column;gap:6px;padding:12px 0;">
       <div class="row" style="width:100%;align-items:center;">
         <div class="name" style="flex:1;">${a.nome}</div>
+        <button class="btn small secondary" data-edit-conta-saldo="${a.id}">editar</button>
         <button class="btn small secondary" data-edit-saldo-inicial="${a.id}">saldo inicial</button>
       </div>
       <div class="grid3" style="width:100%;">
@@ -1191,6 +1192,7 @@ function viewEmprestimosCard(){
 function bindFaturasEvents(){
   bindMonthNav();
   document.querySelectorAll('[data-edit-saldo-inicial]').forEach(b=> b.addEventListener('click', ()=>openEditSaldoInicialModal(b.dataset.editSaldoInicial)));
+  document.querySelectorAll('[data-edit-conta-saldo]').forEach(b=> b.addEventListener('click', ()=>openEditContaModal(b.dataset.editContaSaldo)));
   const btnNovaContaSaldo = document.getElementById('btn-nova-conta-saldo');
   if(btnNovaContaSaldo) btnNovaContaSaldo.addEventListener('click', openNovaContaModal);
   const b1 = document.getElementById('btn-nova-entrada-fixa'); if(b1) b1.addEventListener('click', openNovaEntradaFixaModal);

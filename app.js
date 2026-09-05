@@ -226,10 +226,19 @@ function viewSaldoContasCard(mk){
         <button class="btn small secondary" data-del-conta-saldo="${a.id}" style="flex:none;">excluir</button>
         <button class="btn small secondary" data-edit-saldo-inicial="${a.id}" style="flex:none;">saldo inicial</button>
       </div>
-      <div class="grid3" style="width:100%;">
-        <div class="stat"><div class="label">INICIAL${info.informado?'':' (estim.)'}</div><div class="val">${fmtMoney(info.inicial)}</div></div>
-        <div class="stat"><div class="label">MOVIMENTAÇÃO</div><div class="val ${info.movimentacao>=0?'pos':'neg'}">${fmtMoney(info.movimentacao)}</div></div>
-        <div class="stat"><div class="label">FINAL CALCULADO</div><div class="val">${fmtMoney(info.final)}</div></div>
+      <div style="width:100%;background:var(--bg-elevated);border-radius:10px;padding:2px 12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);gap:10px;">
+          <span style="font-size:11px;color:var(--text-faint);flex:none;">Inicial${info.informado?'':' (estimado)'}</span>
+          <span class="num" style="font-size:14px;font-weight:600;text-align:right;">${fmtMoney(info.inicial)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);gap:10px;">
+          <span style="font-size:11px;color:var(--text-faint);flex:none;">Variação do mês</span>
+          <span class="num ${info.movimentacao>=0?'pos':'neg'}" style="font-size:14px;font-weight:600;text-align:right;">${fmtMoney(info.movimentacao)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;gap:10px;">
+          <span style="font-size:11px;color:var(--text-faint);flex:none;">Final calculado</span>
+          <span class="num" style="font-size:14px;font-weight:600;text-align:right;">${fmtMoney(info.final)}</span>
+        </div>
       </div>
     </div>`;
   }).join('');

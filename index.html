@@ -63,12 +63,13 @@
 
   .row{display:flex;gap:10px;}
   .row > *{flex:1;}
-  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;min-width:0;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-width:0;}
 
-  .stat{background:var(--bg-elevated);border-radius:10px;padding:10px 12px;}
+  .stat{background:var(--bg-elevated);border-radius:10px;padding:10px 12px;min-width:0;overflow:hidden;}
   .stat .label{font-size:10.5px;color:var(--text-faint);margin-bottom:4px;}
-  .stat .val{font-family:var(--mono);font-size:15px;font-weight:600;}
+  .stat .val{font-family:var(--mono);font-size:14px;font-weight:600;overflow-wrap:anywhere;word-break:break-word;line-height:1.25;}
+  .stat .label{overflow-wrap:break-word;}
 
   label{display:block;font-size:11.5px;color:var(--text-dim);margin:10px 0 4px;}
   input, select, textarea{

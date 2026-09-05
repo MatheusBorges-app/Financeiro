@@ -540,6 +540,13 @@ function viewLancamentos(){
       <label>Valor ${lancForm.forma==='credito_parcelado'?'(total)':''}</label>
       <input type="text" inputmode="decimal" name="valor" class="money" placeholder="R$ 0,00" required />
 
+      ${STATE.groups.length ? `
+      <label>Vincular a um grupo</label>
+      <select name="grupo">
+        <option value="">Nenhum</option>
+        ${STATE.groups.filter(g=>!g.encerrado).map(g=>`<option value="${g.id}">${g.nome}</option>`).join('')}
+      </select>` : ''}
+
       <label style="display:flex;align-items:center;gap:6px;margin-top:12px;">
         <input type="checkbox" name="emprestimo" style="width:auto;" /> Emprestei para alguém
       </label>
@@ -600,26 +607,29 @@ async function addEntry(e){
   const emprestimo = fd.get('emprestimo') === 'on';
   const devedor = fd.get('devedor');
   const origem = tipo==='receita' ? (fd.get('origem')==='outro' ? (fd.get('origemOutro')||'Outro') : fd.get('origem')) : null;
+  const grupoVinculado = fd.get('grupo') || null;
 
   if(forma === 'credito_parcelado'){
     const n = parseInt(fd.get('parcelas')||'2',10);
     const valorParcela = Math.round((valorTotal/n)*100)/100;
-    const grupoId = uid();
+    const parcelaGrupoId = uid();
     for(let i=0;i<n;i++){
       const d = new Date(base.data+'T00:00:00');
       d.setMonth(d.getMonth()+i);
       STATE.entries.push({
         id: uid(), tipo:'despesa', forma, valor: valorParcela,
         ...base, data: d.toISOString().slice(0,10),
-        parcelaGrupo: grupoId, parcelaAtual: i+1, totalParcelas: n,
-        devedor: emprestimo ? devedor : null
+        parcelaGrupo: parcelaGrupoId, parcelaAtual: i+1, totalParcelas: n,
+        devedor: emprestimo ? devedor : null,
+        grupo: grupoVinculado
       });
     }
   } else {
     STATE.entries.push({
       id: uid(), tipo, forma, valor: valorTotal, ...base,
       devedor: emprestimo ? devedor : null,
-      origem: origem || null
+      origem: origem || null,
+      grupo: grupoVinculado
     });
   }
   await persist();
@@ -680,21 +690,63 @@ function renderLancList(){
   document.getElementById('lanc-search').setSelectionRange(lancBusca.length, lancBusca.length);
 }
 
+function formaLabel(f){
+  const map = { debito:'Débito', pix:'Pix', dinheiro:'Dinheiro', credito:'Crédito', credito_parcelado:'Crédito parcelado' };
+  return map[f] || f || '—';
+}
+
+function detailRow(label, value){
+  if(value===null || value===undefined || value==='') return '';
+  return `<div class="fixedline"><div class="sub">${label}</div><div style="font-size:13.5px;text-align:right;">${value}</div></div>`;
+}
+
 function openEntryOptions(id){
   const e = STATE.entries.find(x=>x.id===id);
   if(!e) return;
-  if(e.tipo==='transferencia' || e.tipo==='fatura_paga'){
+  const acc = accountById(e.conta);
+  const cat = categoryById(e.categoria);
+  const grupo = e.grupo ? STATE.groups.find(g=>g.id===e.grupo) : null;
+  const fixo = e.gastoFixoId ? STATE.fixedExpenses.find(f=>f.id===e.gastoFixoId) : null;
+
+  if(e.tipo==='transferencia'){
+    const de = accountById(e.contaOrigem);
+    const para = accountById(e.conta);
+    openModal(`
+      <div class="modal-head"><h3>Transferência</h3><button class="x" onclick="closeModal()">×</button></div>
+      ${detailRow('Valor', `<b class="num">${fmtMoney(e.valor)}</b>`)}
+      ${detailRow('Data', fmtDate(e.data))}
+      ${detailRow('De', de?de.nome:'—')}
+      ${detailRow('Para', para?para.nome:'—')}
+      <button class="btn danger" style="margin-top:14px;" onclick="deleteEntry('${id}')">Excluir</button>
+    `);
+    return;
+  }
+  if(e.tipo==='fatura_paga'){
     openModal(`
       <div class="modal-head"><h3>${e.descricao}</h3><button class="x" onclick="closeModal()">×</button></div>
-      <p class="desc">${fmtDate(e.data)} · ${fmtMoney(e.valor)}</p>
+      ${detailRow('Valor pago', `<b class="num">${fmtMoney(e.valor)}</b>`)}
+      ${detailRow('Data do pagamento', fmtDate(e.data))}
+      ${detailRow('Conta/cartão', acc?acc.nome:'—')}
+      <p class="desc" style="margin-top:10px;">Excluir isso desfaz o pagamento — as compras dessa fatura voltam pra "em aberto".</p>
       <button class="btn danger" onclick="deleteEntry('${id}')">Excluir</button>
     `);
     return;
   }
+
   openModal(`
     <div class="modal-head"><h3>${e.descricao}</h3><button class="x" onclick="closeModal()">×</button></div>
-    <p class="desc">${fmtDate(e.data)} · ${fmtMoney(e.valor)}</p>
-    <button class="btn secondary" style="margin-bottom:8px;" onclick="openEditEntryModal('${id}')">Editar</button>
+    ${detailRow('Tipo', e.tipo==='receita'?'Receita':'Despesa')}
+    ${detailRow('Valor', `<b class="num ${e.tipo==='receita'?'pos':'neg'}">${fmtMoney(e.valor)}</b>`)}
+    ${detailRow('Data', fmtDate(e.data))}
+    ${detailRow('Conta / Cartão', acc?acc.nome:'—')}
+    ${e.tipo==='despesa' ? detailRow('Forma', formaLabel(e.forma)) : ''}
+    ${e.tipo==='receita' ? detailRow('Origem', origemLabel(e.origem)) : ''}
+    ${detailRow('Categoria', cat?cat.nome:'—')}
+    ${e.totalParcelas ? detailRow('Parcela', `${e.parcelaAtual} de ${e.totalParcelas}`) : ''}
+    ${fixo ? detailRow('Gerado do gasto fixo', fixo.descricao) : ''}
+    ${grupo ? detailRow('Grupo', grupo.nome) : ''}
+    ${e.devedor ? detailRow('Emprestado para', e.devedor) : ''}
+    <button class="btn secondary" style="margin-top:14px;margin-bottom:8px;" onclick="openEditEntryModal('${id}')">Editar</button>
     <button class="btn danger" onclick="deleteEntry('${id}')">Excluir</button>
   `);
 }
@@ -733,6 +785,12 @@ function openEditEntryModal(id){
       </div>
       <label>Valor</label>
       <input type="text" inputmode="decimal" name="valor" value="${(e.valor||0).toFixed(2).replace('.',',')}" required />
+      ${STATE.groups.length ? `
+      <label>Grupo</label>
+      <select name="grupo">
+        <option value="">Nenhum</option>
+        ${STATE.groups.map(g=>`<option value="${g.id}" ${e.grupo===g.id?'selected':''}>${g.nome}</option>`).join('')}
+      </select>` : ''}
       <button type="submit" class="btn" style="margin-top:14px;">Salvar alterações</button>
     </form>
   `);
@@ -746,6 +804,7 @@ function openEditEntryModal(id){
     e.categoria = fd.get('categoria');
     e.data = fd.get('data') || e.data;
     e.valor = parseMoney(fd.get('valor'));
+    if(STATE.groups.length) e.grupo = fd.get('grupo') || null;
     await persist();
     closeModal();
     renderAll();

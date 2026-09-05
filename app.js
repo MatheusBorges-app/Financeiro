@@ -219,12 +219,12 @@ function viewSaldoContasCard(mk){
   const rows = STATE.accounts.map(a=>{
     const info = saldoContaInfo(a.id, mk);
     return `
-    <div class="fixedline" style="align-items:flex-start;flex-direction:column;gap:6px;padding:12px 0;">
-      <div class="row" style="width:100%;align-items:center;">
-        <div class="name" style="flex:1;">${a.nome}</div>
-        <button class="btn small secondary" data-edit-conta-saldo="${a.id}">editar</button>
-        <button class="btn small secondary" data-del-conta-saldo="${a.id}">excluir</button>
-        <button class="btn small secondary" data-edit-saldo-inicial="${a.id}">saldo inicial</button>
+    <div class="fixedline" style="align-items:flex-start;flex-direction:column;gap:8px;padding:12px 0;">
+      <div class="name" style="width:100%;font-weight:600;">${a.nome}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;width:100%;">
+        <button class="btn small secondary" data-edit-conta-saldo="${a.id}" style="flex:none;">editar</button>
+        <button class="btn small secondary" data-del-conta-saldo="${a.id}" style="flex:none;">excluir</button>
+        <button class="btn small secondary" data-edit-saldo-inicial="${a.id}" style="flex:none;">saldo inicial</button>
       </div>
       <div class="grid3" style="width:100%;">
         <div class="stat"><div class="label">INICIAL${info.informado?'':' (estim.)'}</div><div class="val">${fmtMoney(info.inicial)}</div></div>

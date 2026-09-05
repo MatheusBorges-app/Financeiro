@@ -440,6 +440,10 @@ function viewLancamentos(){
   let filtered = es;
   if(lancFiltro==='conta') filtered = es.filter(e=> e.tipo==='transferencia' || e.tipo==='receita' || (e.tipo==='despesa' && ['debito','dinheiro','pix'].includes(e.forma)));
   if(lancFiltro==='cartao') filtered = es.filter(e=> e.tipo==='despesa' && ['credito','credito_parcelado'].includes(e.forma));
+  if(lancFiltro.startsWith('acc:')){
+    const accId = lancFiltro.slice(4);
+    filtered = es.filter(e=> e.conta===accId || e.contaOrigem===accId);
+  }
   if(lancBusca.trim()) filtered = filtered.filter(e=> e.descricao.toLowerCase().includes(lancBusca.toLowerCase()));
   filtered = filtered.slice().sort((a,b)=> b.data.localeCompare(a.data) || (b.criadoEm||0)-(a.criadoEm||0));
 
@@ -566,6 +570,7 @@ function viewLancamentos(){
       <div class="chip ${lancFiltro==='tudo'?'active':''}" data-f="tudo">Tudo</div>
       <div class="chip ${lancFiltro==='conta'?'active':''}" data-f="conta">Conta</div>
       <div class="chip ${lancFiltro==='cartao'?'active':''}" data-f="cartao">Cartão</div>
+      ${STATE.accounts.map(a=>`<div class="chip ${lancFiltro==='acc:'+a.id?'active':''}" data-f="acc:${a.id}">${a.nome}</div>`).join('')}
     </div>
     <p class="desc">entrou <span class="pos num">${fmtMoney(entrouTotal)}</span> · saiu <span class="neg num">${fmtMoney(saiuTotal)}</span> · cartão <span class="num" style="color:var(--amber)">${fmtMoney(cartaoTotal)}</span></p>
     <input type="text" class="search" id="lanc-search" placeholder="Buscar lançamentos..." value="${lancBusca}" />
